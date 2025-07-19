@@ -1,0 +1,279 @@
+
+def detect_steps(timeseries, size_range, threshold):
+    printout_on = False
+    show_step_graph = False
+    n = size_range[0][0]  # Minimum length of continuous indices
+
+    step_boundaries_threshold = 0.1
+    threshold_iterator = threshold * 0.2
+    gradient_tolerence_cofactor = 0.3
+
+    # Define tolerances
+    mean_tolerance = 0.05  # Tolerance for comparing means of median regions
+    flank_mean_tolerance = 0.04  # Smaller tolerance for comparing means of flanking regions
+    gradient_tolerance = 0.06  # Tolerance for gradient comparisons
+    prediction_tolerance = 0.05  # Tolerance for gradient prediction accuracy
+    derivative_tolerance = 0.03  # Tolerance for comparing the mean of the difference in first and second derivatives
+
+    # Check timeseries is clean
+    assert 0 <= timeseries[0] <= 1 and 0 <= timeseries[-1] <= 1, "Timeseries should start and end between 0 and 1"
+
+    # First, get the first and second derivitive of the ts
+    gradients = np.diff(timeseries)
+    gradients_2nd = np.diff(gradients)
+
+    # Get the first, obvious step boundaries
+    step_boundaries = np.where(np.abs(gradients) > step_boundaries_threshold)[0]
+
+    # Get flat regions, increasing the threshold until you have enough
+    while threshold < 1:
+        flat_indices = np.where(np.abs(gradients) < threshold)[0]
+        continuous_sequences = np.split(flat_indices, np.where(np.diff(flat_indices) != 1)[0] + 1)
+        if len(flat_indices) >= len(gradients) * 0.9:
+            break
+        threshold += threshold_iterator
+        if threshold > 1:
+            threshold = 1
+    step_regions = [(seq[0], seq[-1]) for seq in continuous_sequences if len(seq) >= n]
+
+    # Begin merging loop based on a series of checks
+    flank_size = 20
+
+    i = 0
+    while i < len(step_regions) - 1:
+        start_current, end_current = step_regions[i]
+        start_next, end_next = step_regions[i + 1]
+
+        # Calculate median index for current and next steps
+        median_index_current = np.median(np.arange(start_current, end_current + 1))
+        median_index_next = np.median(np.arange(start_next, end_next + 1))
+
+        # Determine median and flank regions, ensuring they are within step boundaries
+        median_region_start_current = int(max(start_current, median_index_current - flank_size // 4))
+        median_region_end_current = int(min(end_current, median_index_current + flank_size // 4))
+        flank_start_current = int(max(start_current, median_index_current - flank_size // 2))
+        flank_end_current = int(min(end_current, median_index_current + flank_size // 2))
+
+        median_region_start_next = int(max(start_next, median_index_next - flank_size // 4))
+        median_region_end_next = int(min(end_next, median_index_next + flank_size // 4))
+        flank_start_next = int(max(start_next, median_index_next - flank_size // 2))
+        flank_end_next = int(min(end_next, median_index_next + flank_size // 2))
+
+        # Check if regions are full-sized
+        is_full_median_current = (median_region_end_current - median_region_start_current) >= (flank_size // 2)
+        is_full_flank_current = (flank_end_current - flank_start_current) >= flank_size
+        is_full_median_next = (median_region_end_next - median_region_start_next) >= (flank_size // 2)
+        is_full_flank_next = (flank_end_next - flank_start_next) >= flank_size
+
+        # Get gap size
+        gap_size = start_next - end_current - 1
+
+        # Calculate gradients and means only if regions are full-sized
+        if is_full_median_current:
+            gradient_median_current = np.gradient(timeseries[median_region_start_current:median_region_end_current + 1]).mean()
+            mean_median_current = np.mean(timeseries[median_region_start_current:median_region_end_current + 1])
+        else:
+            gradient_median_current = None  # or set to a default value indicating an incomplete calculation
+            mean_median_current = None  # or set to a default value
+
+        if is_full_flank_current:
+            gradient_flank_current = np.gradient(timeseries[flank_start_current:flank_end_current + 1]).mean()
+            mean_flank_current = np.mean(timeseries[flank_start_current:flank_end_current + 1])
+            mean_gradient_flank_current = np.mean(gradients[flank_start_current:flank_end_current])
+        else:
+            gradient_flank_current = None  # or set to a default value
+            mean_flank_current = None  # or set to a default value
+            mean_gradient_flank_current = None
+
+        # Calculate gradients and means for the next step's regions only if they are full-sized
+        if is_full_median_next:
+            gradient_median_next = np.gradient(timeseries[median_region_start_next:median_region_end_next + 1]).mean()
+            mean_median_next = np.mean(timeseries[median_region_start_next:median_region_end_next + 1])
+        else:
+            gradient_median_next = None  # or set to a default value indicating an incomplete calculation
+            mean_median_next = None  # or set to a default value
+
+        if is_full_flank_next:
+            gradient_flank_next = np.gradient(timeseries[flank_start_next:flank_end_next + 1]).mean()
+            mean_flank_next = np.mean(timeseries[flank_start_next:flank_end_next + 1])
+            mean_gradient_flank_next = np.mean(gradients[flank_start_next:flank_end_next])
+        else:
+            gradient_flank_next = None  # or set to a default value
+            mean_flank_next = None  # or set to a default value
+            mean_gradient_flank_next = None
+
+        if is_full_flank_current and is_full_flank_next and gap_size >= flank_size:
+            gradient_gap = np.gradient(timeseries[flank_end_current:flank_start_next + 1]).mean()
+        else:
+            gradient_gap = None  # or set to a default value
+
+        # Use the calculated values and flags in further decision-making
+
+        # Check if means of the median regions are similar within tolerance and not None
+        median_means_similar = False
+        if mean_median_current is not None and mean_median_next is not None:
+            if abs(mean_median_current - mean_median_next) <= mean_tolerance:
+                median_means_similar = True
+
+        # Check if means of the flanking regions are similar within a smaller tolerance and not None
+        flank_means_similar = False
+        if mean_flank_current is not None and mean_flank_next is not None:
+            if abs(mean_flank_current - mean_flank_next) <= flank_mean_tolerance:
+                flank_means_similar = True
+
+        # Check if gradients of the flanking regions are similar within tolerance and not None
+        gradients_similar = False
+        if gradient_flank_current is not None and gradient_flank_next is not None:
+            if abs(gradient_flank_current - gradient_flank_next) <= gradient_tolerance:
+                gradients_similar = True
+
+        # Predict the first value of the next step using the gradient of the first step and check accuracy, ensuring gradients are not None
+        prediction_accurate = False
+        if gradient_flank_current is not None:
+            predicted_next_start = timeseries[end_current] + gradient_flank_current * (start_next - end_current - 1)
+            if abs(predicted_next_start - timeseries[start_next]) <= prediction_tolerance:
+                prediction_accurate = True
+
+        # Check if the gradient of the gap is similar to the gradients of the flanking regions and not None
+        gap_gradient_similar = False
+        if gradient_gap is not None and gradient_flank_current is not None and gradient_flank_next is not None:
+            if (abs(gradient_gap - gradient_flank_current) <= gradient_tolerance and
+                abs(gradient_gap - gradient_flank_next) <= gradient_tolerance):
+                gap_gradient_similar = True
+
+        # Compare the means of the gradients within tolerance and ensure they are not None
+        gradients_flanks_similar = False
+        if mean_gradient_flank_current is not None and mean_gradient_flank_next is not None:
+            if abs(mean_gradient_flank_current - mean_gradient_flank_next) <= derivative_tolerance:
+                gradients_flanks_similar = True
+
+
+        # Decision to merge based on all checks
+        #if median_means_similar and flank_means_similar and gradients_similar and prediction_accurate and gap_gradient_similar and gradients_flanks_similar:
+        # flank means similar needs to care about size of gap
+        if prediction_accurate and gap_gradient_similar and gradients_flanks_similar:
+            # Merge steps
+            if printout_on:
+              print(f"Merging steps {i} and {i+1} based on all criteria met.")
+            step_regions[i] = (step_regions[i][0], step_regions[i + 1][1])
+            del step_regions[i + 1]
+            # Optionally, adjust the loop index if further checks are needed
+        else:
+            if printout_on:
+              print(f"Not merging steps {i} and {i+1} due to failing one or more criteria.")
+              if not median_means_similar:
+                print("median_means_similar: false")
+              if not flank_means_similar:
+                print("flank_means_similar: false")
+              if not gradients_similar:
+                print("gradients_similar: false")
+              if not prediction_accurate:
+                print("prediction_accurate: false")
+              if not gap_gradient_similar:
+                print("gap_gradient_similar: false")
+              if not gradients_flanks_similar:
+                print("gradients_flanks_similar: false")
+
+        i += 1  # Move to the next pair of steps
+
+    flank_mean_tolerance = 0.05  # High tolerance to force merging
+
+    # Initialize an index i outside the loop for proper control over iteration
+    i = 0
+    while i < len(step_regions) - 1:
+        start_current, end_current = step_regions[i]
+        start_next, end_next = step_regions[i + 1]
+
+        # Calculation of means for the flanking regions
+        mean_flank_current = np.mean(timeseries[max(0, end_current - 5):end_current])
+        mean_flank_next = np.mean(timeseries[start_next:min(len(timeseries), start_next + 5)])
+
+        # Merging condition based on the flanking region means
+        if abs(mean_flank_current - mean_flank_next) <= flank_mean_tolerance:
+            if printout_on:
+              print(f"Merging steps {i} and {i+1}.")
+            # Update the current step region to span both steps being merged
+            step_regions[i] = (step_regions[i][0], step_regions[i + 1][1])
+            # Remove the next step since it's now merged
+            del step_regions[i + 1]
+            # Do not increment i to check next step against the newly merged step
+        else:
+            # Only increment i if no merge occurred
+            i += 1
+
+
+    # Identify new small step regions based on the new criteria
+    existing_step_means = [np.mean(timeseries[start:end+1]) for start, end in step_regions]
+    gradients_abs = np.abs(gradients)
+    potential_new_steps = np.where(gradients_abs < gradient_tolerance)[0]
+    continuous_new_steps = np.split(potential_new_steps, np.where(np.diff(potential_new_steps) != 1)[0] + 1)
+
+    for seq in continuous_new_steps:
+        if len(seq) >= 8:  # Check for minimum size
+            mean_of_seq = np.mean(timeseries[seq[0]:seq[-1]+1])
+            if not any(abs(mean_of_seq - mean_step) < 0.1 for mean_step in existing_step_means):
+                # This is a new step region; append it if it doesn't overlap with existing steps
+                if not any(seq[0] <= end and seq[-1] >= start for start, end in step_regions):
+                    step_regions.append((seq[0], seq[-1]))
+
+    step_regions.sort()  # Ensure the step regions are in order after adding new ones
+
+    # Check if no steps are detected at all
+    if len(step_regions) == 0:
+      print('no step detected')
+
+    # Calculate mean gradient for each step region
+    step_gradients = []
+    for start, end in step_regions:
+        step_gradient = np.mean(np.gradient(timeseries[start:end + 1]))
+        step_gradients.append(step_gradient)
+
+    # Show graph if the timeseries is detected as having more than one step
+    if len(step_regions) > 1 and show_step_graph:
+        fig = plt.figure(figsize=(20, 5))
+        plt.subplots_adjust(bottom=0., left=0, top=1., right=1)
+
+        x = list(range(len(timeseries)))
+        y = timeseries
+
+        # Plotting the sorted timeseries
+        ax = fig.add_subplot(1,1,1)  # One row, one column, first cell
+        ax.scatter(x, y, color='blue', label='Timeseries Data')  # Plot the timeseries
+
+        # Highlighting the detected steps
+        for start, end in step_regions:
+            ax.plot(x[start:end+1], y[start:end+1], color='red', linewidth=2, label='Detected Step')
+
+        ax.set_title('Detected Steps in Timeseries')
+        ax.set_xlabel('Index')
+        ax.set_ylabel('Value')
+        ax.legend()
+
+        plt.show()
+
+    # Show graph if the timeseries is detected as having no steps
+    if len(step_regions) == 0:
+        fig = plt.figure(figsize=(20, 5))
+        plt.subplots_adjust(bottom=0., left=0, top=1., right=1)
+
+        x = list(range(len(timeseries)))
+        y = timeseries
+
+        # Plotting the sorted timeseries
+        ax = fig.add_subplot(1,1,1)  # One row, one column, first cell
+        ax.scatter(x, y, color='blue', label='Timeseries Data')  # Plot the timeseries
+
+        # Highlighting the detected steps
+        for start, end in step_regions:
+            ax.plot(x[start:end+1], y[start:end+1], color='red', linewidth=2, label='Detected Step')
+
+        ax.set_title('Detected Steps in Timeseries')
+        ax.set_xlabel('Index')
+        ax.set_ylabel('Value')
+        ax.legend()
+
+        plt.show()
+
+    if printout_on:
+      print({"steps": step_regions})
+    return {"steps": step_regions, "step_grads": gradients} # "big_steps": step_regions,
