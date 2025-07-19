@@ -1,0 +1,50 @@
+
+def get_dc(df = None, group_col = None, position_col = None, target_col = None, threshold=0.0001):
+
+    if group_col is None:
+      group_col = 'FEATURE_UCSC_CGI_subgroups_sliwin_50'
+
+    if position_col is None:
+      position_col = 'FEATURE_UCSC_position'
+
+    if target_col is None:
+      target_col = 'beta_SD'
+
+    if 'FEATURE_UCSC_position' not in df.columns:
+      print('Missing position column!')
+      return
+
+    # Sort the DataFrame by group and position without resetting the index
+    df = df.sort_values(by=[group_col, position_col])
+    df = df.dropna(subset=[position_col])
+    df[position_col] = pd.to_numeric(df[position_col], errors='coerce')
+
+
+    # Calculate forward and backward differences
+    df['diff_prev'] = df.groupby(group_col)[target_col].diff()
+    df['pos_diff_prev'] = df.groupby(group_col)[position_col].diff()
+
+    df['diff_next'] = df.groupby(group_col)[target_col].shift(-1) - df[target_col]
+    df['pos_diff_next'] = df.groupby(group_col)[position_col].shift(-1) - df[position_col]
+
+    # Threshold conditions for direction changes
+    df['dc_prev'] = (
+        (df['diff_prev'].abs() >= (df['pos_diff_prev'] * threshold)) &
+        (np.sign(df['diff_prev']) != np.sign(df.groupby(group_col)['diff_prev'].shift(1)))
+    )
+    df['dc_next'] = (
+        (df['diff_next'].abs() >= (df['pos_diff_next'] * threshold)) &
+        (np.sign(df['diff_next']) != np.sign(df['diff_prev']))
+    )
+
+    # Combine forward and backward checks
+    df['dc'] = (df['dc_prev'] | df['dc_next']).astype(int)
+
+    # Drop intermediate columns to save memory
+    df = df.drop(columns=['diff_prev', 'pos_diff_prev', 'diff_next', 'pos_diff_next', 'dc_prev', 'dc_next'])
+
+    # Restore original index order
+    df = df.sort_index()
+
+    return df
+    
